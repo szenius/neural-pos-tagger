@@ -75,7 +75,6 @@ class POSTagger(nn.Module):
         return tag_scores
         
 
-
 def preprocess(lines):
     '''
     Read list of sentences, extract characters, words and POS tags, and build a dictionary each for
@@ -188,7 +187,11 @@ def train_model(train_file, model_file):
             optimizer.step()
 
             # Print loss and accuracy
-            num_correct = 0 # TODO: compute accuracy
+            num_correct = 0
+            for i in range(tag_scores.size()[0]):
+                max_prob, predicted_index = torch.max(tag_scores[i], 0)
+                if predicted_index.item() == tag_indices[i].item():
+                    num_correct += 1
             print("Epoch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, loss.data[0], num_correct / tag_indices.shape[0]))
 
      

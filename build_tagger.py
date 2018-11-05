@@ -202,20 +202,23 @@ def train_model(train_file, model_file):
                 tag_indices_batch.append(tag_indices)
 
             # Forward pass
-            tag_scores = model(char_indices, word_indices)
+            tag_scores_batch = model(char_indices_batch, word_indices_batch)
 
             # Backward pass
-            loss = loss_function(tag_scores, tag_indices)
+            loss = loss_function(tag_scores_batch, tag_indices_batch)
             loss.backward()
             optimizer.step()
 
             # Print loss and accuracy
             num_correct = 0
-            for i in range(tag_scores.size()[0]):
-                max_prob, predicted_index = torch.max(tag_scores[i], 0)
-                if predicted_index.item() == tag_indices[i].item():
-                    num_correct += 1
-            print("Epoch {}/{} | Batch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / tag_indices.size()[0]))
+            num_predictions = 0
+            for tag_scores in tag_scores_batch:
+                for i in range(tag_scores.size()[0]):
+                    max_prob, predicted_index = torch.max(tag_scores[i], 0)
+                    num_predictions += 1
+                    if predicted_index.item() == tag_indices[i].item():
+                        num_correct += 1
+            print("Epoch {}/{} | Batch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions))
 
      
     print('Finished...')

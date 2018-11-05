@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+import numpy as np
+
 torch.manual_seed(1)
 
 # Parameters
@@ -55,7 +57,21 @@ class POSTagger(nn.Module):
         Input sentence should be a list of tokens.
         Runs Character level CNN + Word level bi-directional LSTM.
         '''
-        # Character-level CNN
+        ############ Character-level CNN ############
+        # Generate character embeddings using Embedding layer
+        word_embedding_char_level_batch = []
+        for sentence in char_indices_batch:
+            word_embedding_char_level_sent = []
+            for word in sentence:
+                word_tensor = torch.tensor(word, dtype=torch.long).to(device)
+                word_embedding_char_level_sent.append(self.char_embeddings(word_tensor))
+            word_embedding_char_level_sent = torch.stack(word_embedding_char_level_sent).to(device)
+            word_embedding_char_level_batch.append(word_embedding_char_level_sent)
+        word_embedding_char_level_batch = torch.stack(word_embedding_char_level_batch).to(device)
+
+        # Generate word embeddings using CNN
+        print(word_embedding_char_level_batch.size())
+        sys.exit()
         sentence_embedding = []
         for i in range(len(char_indices)):
             # Get word embedding by running character embeddings through CNN
@@ -133,8 +149,10 @@ def build_dictionary(item_set, add_pad=False):
     result = {}
     for item in item_set:
         result[item] = len(result)
+        if add_pad == True:
+            result[item] += 1
     if add_pad == True:
-        result[PAD_KEY] = -1
+        result[PAD_KEY] = 0
     return result
 
 def read_input(fname):

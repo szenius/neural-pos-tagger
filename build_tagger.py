@@ -222,6 +222,8 @@ def train_model(train_file, model_file):
         print("STARTING EPOCH {}/{}...".format(epoch + 1, epochs))
         shuffle(preprocessed_data)
         for batch_index, batch in enumerate(preprocessed_data):
+            start_batch = datetime.now()
+
             # Clear gradients and hidden layer
             model.zero_grad()
             model.lstm_hidden_embeddings = model.init_hidden_embeddings(len(batch))
@@ -248,6 +250,8 @@ def train_model(train_file, model_file):
             loss.backward()
             optimizer.step()
 
+            end_batch = datetime.now()
+
             # Print loss and accuracy
             num_correct = 0
             num_predictions = 0
@@ -258,7 +262,7 @@ def train_model(train_file, model_file):
                 num_predictions += 1
                 if predicted_index.item() == target[i].item():
                     num_correct += 1
-            print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions))
+            print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
 
     end = datetime.now()
     print('Finished... Took {}'.format(end - start))

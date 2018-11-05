@@ -38,7 +38,7 @@ class POSTagger(nn.Module):
         self.conv_kernel = 3
         self.maxpool_kernel = 1
         self.lstm_hidden_dim = 250
-        self.dropout = 0.5
+        self.dropout = 0
 
         # Embeddings
         self.char_embeddings = nn.Embedding(charset_size, self.char_embedding_dim).to(device)
@@ -225,28 +225,30 @@ def train_model(train_file, model_file):
             # Forward pass
             tag_scores_batch, max_sentence_length = model(char_indices_batch, word_indices_batch)
 
-            # Pad output to max sentence length
+            # Pad output to max sentence length and collapse output from different batches
+            target = []
+            output = []
             for idx, tag_indices in enumerate(tag_indices_batch):
+                target.extend(tag_indices)
                 for i in range(len(tag_indices), max_sentence_length):
-                    tag_indices.append(-1)
-                tag_indices_batch[idx] = torch.tensor(tag_indices, dtype=torch.long).to(device)
-            tag_indices_batch = torch.stack(tag_indices_batch).to(device)
+                    target.append(0)
+                output.extend(tag_scores_batch[idx])
+            target = torch.tensor(target, dtype=torch.long).to(device)
+            output = torch.stack(output).to(device)
 
             # Backward pass
-            print(tag_scores_batch.size(), tag_indices_batch.size())
-            loss = loss_function(tag_scores_batch, tag_indices_batch)
+            loss = loss_function(output, target)
             loss.backward()
             optimizer.step()
 
             # Print loss and accuracy
             num_correct = 0
             num_predictions = 0
-            for tag_scores in tag_scores_batch:
-                for i in range(tag_scores.size()[0]):
-                    max_prob, predicted_index = torch.max(tag_scores[i], 0)
-                    num_predictions += 1
-                    if predicted_index.item() == tag_indices[i].item():
-                        num_correct += 1
+            for i in range(output.size()[0]):
+                max_prob, predicted_index = torch.max(output[i], 0)
+                num_predictions += 1
+                if predicted_index.item() == target[i].item():
+                    num_correct += 1
             print("Epoch {}/{} | Batch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions))
 
      

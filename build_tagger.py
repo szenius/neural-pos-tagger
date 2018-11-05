@@ -27,7 +27,7 @@ epochs = 10
 batch_size = 128
 
 # Constants
-PAD_KEY = '<PAD>'
+PAD_TARGET_INDEX = -1
 
 class POSTagger(nn.Module):
     def __init__(self, charset_size, vocab_size, tagset_size):
@@ -41,7 +41,8 @@ class POSTagger(nn.Module):
         self.conv_kernel = 3
         self.maxpool_kernel = 1
         self.lstm_hidden_dim = 250
-        self.dropout = 0
+        self.lstm_num_layers = 2
+        self.dropout = 0.5
 
         # Embeddings
         self.char_embeddings = nn.Embedding(charset_size, self.char_embedding_dim).to(device)
@@ -50,12 +51,12 @@ class POSTagger(nn.Module):
 
         # Layers
         self.conv = nn.Conv1d(self.char_embedding_dim, self.conv_filters, self.conv_kernel, bias=True, padding=(self.conv_kernel // 2)).to(device)
-        self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout).to(device)
+        self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout, num_layers=self.lstm_num_layers).to(device)
         self.dense = nn.Linear(self.lstm_hidden_dim, tagset_size).to(device)
     
     def init_hidden_embeddings(self, batch_size):
-        return (torch.zeros(1, batch_size, self.lstm_hidden_dim).to(device),
-                torch.zeros(1, batch_size, self.lstm_hidden_dim).to(device))
+        return (torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_dim).to(device),
+                torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_dim).to(device))
     
     def forward(self, char_indices_batch, word_indices_batch):
         '''
@@ -86,7 +87,7 @@ class POSTagger(nn.Module):
             max_sentence_length = max(max_sentence_length, len(sentence_embedding))
             batch_sentence_embedding.append(sentence_embedding)
         # Pad each sentence to max length
-        empty_word_embedding = [-1 for i in range(self.conv_filters + self.word_embedding_dim)]
+        empty_word_embedding = [PAD_TARGET_INDEX for i in range(self.conv_filters + self.word_embedding_dim)]
         for sent_index, sentence in enumerate(batch_sentence_embedding):
             for i in range(len(sentence), max_sentence_length):
                 sentence.append(torch.tensor(empty_word_embedding.copy(), dtype=torch.float).to(device))
@@ -213,7 +214,7 @@ def train_model(train_file, model_file):
     model = POSTagger(len(char_dict), len(word_dict), len(tag_dict))
     if use_gpu:
         model = model.cuda()
-    loss_function = nn.CrossEntropyLoss().to(device)                               # TODO: Can try setting weight?
+    loss_function = nn.CrossEntropyLoss(ignore_index=-1).to(device)                               # TODO: Can try setting weight?
     optimizer = optim.Adam(model.parameters()) 
 
     # Train model
@@ -237,7 +238,7 @@ def train_model(train_file, model_file):
             for idx, tag_indices in enumerate(tag_indices_batch):
                 target.extend(tag_indices)
                 for i in range(len(tag_indices), max_sentence_length):
-                    target.append(0)
+                    target.append(PAD_TARGET_INDEX)
                 output.extend(tag_scores_batch[idx])
             target = torch.tensor(target, dtype=torch.long).to(device)
             output = torch.stack(output).to(device)
@@ -251,6 +252,8 @@ def train_model(train_file, model_file):
             num_correct = 0
             num_predictions = 0
             for i in range(output.size()[0]):
+                if target[i].item() == PAD_TARGET_INDEX:
+                    continue
                 max_prob, predicted_index = torch.max(output[i], 0)
                 num_predictions += 1
                 if predicted_index.item() == target[i].item():

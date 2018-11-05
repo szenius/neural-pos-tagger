@@ -3,6 +3,7 @@
 import os
 import math
 import sys
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -12,6 +13,7 @@ from torch.autograd import Variable
 from torch.nn.utils.rnn import pad_packed_sequence
 
 import numpy as np
+from random import shuffle
 
 torch.manual_seed(1)
 
@@ -19,9 +21,10 @@ torch.manual_seed(1)
 use_gpu = torch.cuda.is_available()
 device = torch.device("cpu")
 if use_gpu:
+    print("Running train with GPU...")
     device = torch.device("cuda:0")
 epochs = 10
-batch_size = 32
+batch_size = 128
 
 # Constants
 PAD_KEY = '<PAD>'
@@ -43,14 +46,14 @@ class POSTagger(nn.Module):
         # Embeddings
         self.char_embeddings = nn.Embedding(charset_size, self.char_embedding_dim).to(device)
         self.word_embeddings = nn.Embedding(vocab_size, self.word_embedding_dim).to(device)
-        self.lstm_hidden_embeddings = self.init_hidden_embeddings()
+        self.lstm_hidden_embeddings = self.init_hidden_embeddings(batch_size)
 
         # Layers
         self.conv = nn.Conv1d(self.char_embedding_dim, self.conv_filters, self.conv_kernel, bias=True, padding=(self.conv_kernel // 2)).to(device)
         self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout).to(device)
         self.dense = nn.Linear(self.lstm_hidden_dim, tagset_size).to(device)
     
-    def init_hidden_embeddings(self):
+    def init_hidden_embeddings(self, batch_size):
         return (torch.zeros(1, batch_size, self.lstm_hidden_dim).to(device),
                 torch.zeros(1, batch_size, self.lstm_hidden_dim).to(device))
     
@@ -86,7 +89,7 @@ class POSTagger(nn.Module):
         empty_word_embedding = [-1 for i in range(self.conv_filters + self.word_embedding_dim)]
         for sent_index, sentence in enumerate(batch_sentence_embedding):
             for i in range(len(sentence), max_sentence_length):
-                sentence.append(torch.tensor(empty_word_embedding.copy(), dtype=torch.float))
+                sentence.append(torch.tensor(empty_word_embedding.copy(), dtype=torch.float).to(device))
             batch_sentence_embedding[sent_index] = torch.stack(sentence).to(device)
         batch_sentence_embedding = torch.stack(batch_sentence_embedding).to(device)
 
@@ -199,6 +202,8 @@ def get_indices_for_batch(batch, char_dict, word_dict, tag_dict):
     return char_indices_batch, word_indices_batch, tag_indices_batch
 
 def train_model(train_file, model_file):
+    start = datetime.now()
+
     # Prepare dataset
     lines = read_input(train_file)                 
     char_dict, word_dict, tag_dict, preprocessed_data = preprocess(lines)
@@ -214,10 +219,11 @@ def train_model(train_file, model_file):
     # Train model
     for epoch in range(epochs):
         print("STARTING EPOCH {}/{}...".format(epoch + 1, epochs))
+        shuffle(preprocessed_data)
         for batch_index, batch in enumerate(preprocessed_data):
             # Clear gradients and hidden layer
             model.zero_grad()
-            model.lstm_hidden_embeddings = model.init_hidden_embeddings()
+            model.lstm_hidden_embeddings = model.init_hidden_embeddings(len(batch))
 
             # Prepare input to model
             char_indices_batch, word_indices_batch, tag_indices_batch = get_indices_for_batch(batch, char_dict, word_dict, tag_dict)
@@ -249,10 +255,10 @@ def train_model(train_file, model_file):
                 num_predictions += 1
                 if predicted_index.item() == target[i].item():
                     num_correct += 1
-            print("Epoch {}/{} | Batch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions))
+            print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions))
 
-     
-    print('Finished...')
+    end = datetime.now()
+    print('Finished... Took {}'.format(end - start))
 		
 if __name__ == "__main__":
     # make no changes here

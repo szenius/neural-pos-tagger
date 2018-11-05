@@ -19,6 +19,9 @@ if use_gpu:
 epochs = 10
 batch_size = 32
 
+# Constants
+PAD_KEY = '<PAD>'
+
 class POSTagger(nn.Module):
     def __init__(self, charset_size, vocab_size, tagset_size):
         super(POSTagger, self).__init__()
@@ -47,7 +50,7 @@ class POSTagger(nn.Module):
         return (torch.zeros(1, 1, self.lstm_hidden_dim).to(device),
                 torch.zeros(1, 1, self.lstm_hidden_dim).to(device))
     
-    def forward(self, char_indices, word_indices):
+    def forward(self, char_indices_batch, word_indices_batch):
         '''
         Input sentence should be a list of tokens.
         Runs Character level CNN + Word level bi-directional LSTM.
@@ -116,9 +119,9 @@ def preprocess(lines):
             preprocessed_sent_tokens.append(tokens[0])                      # TODO: currently, given word1/word2/tag, ignore word2
         preprocessed_data.append((preprocessed_sent_tokens, sent_tags))     # Add to preprocessed sentences
             
-    return build_dictionary(set(char_set)), build_dictionary(set(word_set)), build_dictionary(set(tag_set)), preprocessed_data
+    return build_dictionary(set(char_set), add_pad=True), build_dictionary(set(word_set), add_pad=True), build_dictionary(set(tag_set)), preprocessed_data
     
-def build_dictionary(item_set):
+def build_dictionary(item_set, add_pad=False):
     '''
     Given a set of items, return a dictionary of the form
     {
@@ -130,6 +133,8 @@ def build_dictionary(item_set):
     result = {}
     for item in item_set:
         result[item] = len(result)
+    if add_pad == True:
+        result[PAD_KEY] = -1
     return result
 
 def read_input(fname):
@@ -144,16 +149,19 @@ def get_word_char_indices(sentence, char_dict, word_dict):
     '''
     Given a sentence, the character and word dictionaries, generate the sequences of 
     word indices and character indices for this particular sentence.
+    Also return max_char_length, which is the length of the longest word.
     '''
     word_indices = []
     char_indices = []
+    max_char_length = 0
     for token in sentence:
         word_indices.append(word_dict[token])
         char_indices_for_word = []
+        max_char_length = max(len(token), max_char_length)
         for c in list(token):
             char_indices_for_word.append(char_dict[c])
         char_indices.append(char_indices_for_word)
-    return char_indices, word_indices
+    return char_indices, word_indices, max_char_length
 
 def get_tag_indices(tags, tag_dict):
     '''
@@ -168,6 +176,48 @@ def batch_data(data, batch_size):
     '''
     for i in range(0, len(data), batch_size):
         yield data[i:i+batch_size]
+
+def get_indices_for_batch(batch, char_dict, word_dict, tag_dict):
+    char_indices_batch = []
+    word_indices_batch = []
+    tag_indices_batch = []
+    max_word_length = 0
+    max_char_length = 0
+    for sentence, tags in batch:
+        # Get indices from dictionaries
+        char_indices, word_indices, largest_char_length_in_sentence = get_word_char_indices(sentence, char_dict, word_dict)
+        tag_indices = get_tag_indices(tags, tag_dict)
+
+        # Append indices to batch indices list
+        char_indices_batch.append(char_indices)
+        word_indices_batch.append(word_indices)
+        tag_indices_batch.append(tag_indices)
+
+        # Update max lengths
+        max_word_length = max(max_word_length, len(word_indices))
+        max_char_length = max(max_char_length, largest_char_length_in_sentence)
+    return char_indices_batch, word_indices_batch, tag_indices_batch, max_word_length, max_char_length
+
+def pad_to_fixed_length(char_batch, word_batch, char_dict, word_dict, max_char_length, max_word_length):
+    '''
+    Pad character indices and word indices so that
+        For char indices, for each word, the number of character indices is the same;
+                          for each sentence, the number of lists of character indices is the same
+        For word indices, for each sentence, the number of word indices is the same
+    Return padded char_batch and word_batch
+    '''
+    for sent_index in range(len(char_batch)):
+        sentence = char_batch[sent_index]
+        for word_index in range(len(sentence)):
+            word = sentence[word_index]
+            # Make sure number of char indices per word is the same
+            for i in range(len(word), max_char_length):
+                word.append(char_dict[PAD_KEY])
+        # Make sure that the number of words per sentence is the same
+        for i in range(len(sentence), max_word_length):
+            sentence.append([char_dict[PAD_KEY] for i in range(max_char_length)])
+            word_batch[sent_index].append(word_dict[PAD_KEY])
+    return char_batch, word_batch
 
 def train_model(train_file, model_file):
     # Prepare dataset
@@ -191,15 +241,8 @@ def train_model(train_file, model_file):
             model.lstm_hidden_embeddings = model.init_hidden_embeddings()
 
             # Prepare input to model
-            char_indices_batch = []
-            word_indices_batch = []
-            tag_indices_batch = []
-            for sentence, tags in batch:
-                char_indices, word_indices = get_word_char_indices(sentence, char_dict, word_dict)
-                tag_indices = get_tag_indices(tags, tag_dict)
-                char_indices_batch.append(char_indices)
-                word_indices_batch.append(word_indices)
-                tag_indices_batch.append(tag_indices)
+            char_indices_batch, word_indices_batch, tag_indices_batch, max_word_length, max_char_length = get_indices_for_batch(batch, char_dict, word_dict, tag_dict)
+            char_indices_batch, word_indices_batch = pad_to_fixed_length(char_indices_batch, word_indices_batch, char_dict, word_dict, max_char_length, max_word_length)
 
             # Forward pass
             tag_scores_batch = model(char_indices_batch, word_indices_batch)

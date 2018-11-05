@@ -185,15 +185,21 @@ def train_model(train_file, model_file):
     # Train model
     for epoch in range(epochs):
         print("STARTING EPOCH {}/{}...".format(epoch + 1, epochs))
-
-        for sentence, tags in preprocessed_data:
+        for batch_index, batch in enumerate(preprocessed_data):
             # Clear gradients and hidden layer
             model.zero_grad()
             model.lstm_hidden_embeddings = model.init_hidden_embeddings()
 
             # Prepare input to model
-            char_indices, word_indices = get_word_char_indices(sentence, char_dict, word_dict)
-            tag_indices = get_tag_indices(tags, tag_dict)
+            char_indices_batch = []
+            word_indices_batch = []
+            tag_indices_batch = []
+            for sentence, tags in batch:
+                char_indices, word_indices = get_word_char_indices(sentence, char_dict, word_dict)
+                tag_indices = get_tag_indices(tags, tag_dict)
+                char_indices_batch.append(char_indices)
+                word_indices_batch.append(word_indices)
+                tag_indices_batch.append(tag_indices)
 
             # Forward pass
             tag_scores = model(char_indices, word_indices)
@@ -209,7 +215,7 @@ def train_model(train_file, model_file):
                 max_prob, predicted_index = torch.max(tag_scores[i], 0)
                 if predicted_index.item() == tag_indices[i].item():
                     num_correct += 1
-            print("Epoch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, loss.data.item(), num_correct / tag_indices.shape[0]))
+            print("Epoch {}/{} | Batch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / tag_indices.size()[0]))
 
      
     print('Finished...')

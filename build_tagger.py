@@ -11,6 +11,14 @@ import torch.optim as optim
 
 torch.manual_seed(1)
 
+# Parameters
+use_gpu = torch.cuda.is_available()
+device = torch.device("cpu")
+if use_gpu:
+    device = torch.device("cuda:0")
+epochs = 10
+batch_size = 32
+
 class POSTagger(nn.Module):
     def __init__(self, charset_size, vocab_size, tagset_size):
         super(POSTagger, self).__init__()
@@ -26,18 +34,18 @@ class POSTagger(nn.Module):
         self.dropout = 0.5
 
         # Embeddings
-        self.char_embeddings = nn.Embedding(charset_size, self.char_embedding_dim)
-        self.word_embeddings = nn.Embedding(vocab_size, self.word_embedding_dim)
+        self.char_embeddings = nn.Embedding(charset_size, self.char_embedding_dim).to(device)
+        self.word_embeddings = nn.Embedding(vocab_size, self.word_embedding_dim).to(device)
         self.lstm_hidden_embeddings = self.init_hidden_embeddings()
 
         # Layers
-        self.conv = nn.Conv1d(self.char_embedding_dim, self.conv_filters, self.conv_kernel, bias=True, padding=(self.conv_kernel // 2))
-        self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout)
-        self.dense = nn.Linear(self.lstm_hidden_dim, tagset_size)
+        self.conv = nn.Conv1d(self.char_embedding_dim, self.conv_filters, self.conv_kernel, bias=True, padding=(self.conv_kernel // 2)).to(device)
+        self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout).to(device)
+        self.dense = nn.Linear(self.lstm_hidden_dim, tagset_size).to(device)
     
     def init_hidden_embeddings(self):
-        return (torch.zeros(1, 1, self.lstm_hidden_dim),
-                torch.zeros(1, 1, self.lstm_hidden_dim))
+        return (torch.zeros(1, 1, self.lstm_hidden_dim).to(device),
+                torch.zeros(1, 1, self.lstm_hidden_dim).to(device))
     
     def forward(self, char_indices, word_indices):
         '''
@@ -50,28 +58,28 @@ class POSTagger(nn.Module):
             # Get word embedding by running character embeddings through CNN
             word_embedding_char_level = []
             for idx in char_indices[i]:
-                char_embedding = self.char_embeddings(torch.tensor(idx, dtype=torch.long))
+                char_embedding = self.char_embeddings(torch.tensor(idx, dtype=torch.long).to(device))
                 word_embedding_char_level.append(char_embedding)
             # Prepare stack of character embeddings
-            word_embedding_char_level = torch.stack(word_embedding_char_level)
+            word_embedding_char_level = torch.stack(word_embedding_char_level).to(device)
             word_embedding_char_level = word_embedding_char_level.permute(1, 0)
-            word_embedding_char_level = torch.stack([word_embedding_char_level])
+            word_embedding_char_level = torch.stack([word_embedding_char_level]).to(device)
             # Convolution on character embeddings
             word_embedding_char_level = self.conv(word_embedding_char_level)
             word_embedding_char_level = torch.max(word_embedding_char_level, 2)[0][0]
 
             # Get word embedding from tokens
-            word_embedding_word_level = self.word_embeddings(torch.tensor(word_indices[i], dtype=torch.long))
+            word_embedding_word_level = self.word_embeddings(torch.tensor(word_indices[i], dtype=torch.long).to(device))
 
             # Concat word embeddings and add to sentence embedding
-            word_embedding = torch.cat((word_embedding_char_level, word_embedding_word_level), 0)
+            word_embedding = torch.cat((word_embedding_char_level, word_embedding_word_level), 0).to(device)
             sentence_embedding.append(word_embedding)
-        sentence_embedding = torch.stack(sentence_embedding)
+        sentence_embedding = torch.stack(sentence_embedding).to(device)
 
         # Word-level LSTM
         lstm_out, self.lstm_hidden_embeddings = self.lstm(sentence_embedding.view(len(char_indices), 1, -1), self.lstm_hidden_embeddings)
         tag_space = self.dense(lstm_out.view(len(char_indices), -1))
-        tag_scores = F.log_softmax(tag_space, dim=1)
+        tag_scores = F.log_softmax(tag_space, dim=1).to(device)
         return tag_scores
         
 
@@ -154,18 +162,27 @@ def get_tag_indices(tags, tag_dict):
     tag_indices = [tag_dict[tag] for tag in tags]
     return torch.tensor(tag_indices, dtype=torch.long)
 
+def batch_data(data, batch_size):
+    '''
+    Split dataset into batches
+    '''
+    for i in range(0, len(data), batch_size):
+        yield data[i:i+batch_size]
+
 def train_model(train_file, model_file):
     # Prepare dataset
-    lines = read_input(train_file)                              
-    char_dict, word_dict, tag_dict, preprocessed_data = preprocess(lines)  
+    lines = read_input(train_file)                 
+    char_dict, word_dict, tag_dict, preprocessed_data = preprocess(lines)
+    preprocessed_data = list(batch_data(preprocessed_data, batch_size))
 
     # Prepare model
     model = POSTagger(len(char_dict), len(word_dict), len(tag_dict))
-    loss_function = nn.CrossEntropyLoss()                               # TODO: Can try setting weight?
-    optimizer = optim.Adam(model.parameters())
+    if use_gpu:
+        model = model.cuda()
+    loss_function = nn.CrossEntropyLoss().to(device)                               # TODO: Can try setting weight?
+    optimizer = optim.Adam(model.parameters()) 
 
     # Train model
-    epochs = 10
     for epoch in range(epochs):
         print("STARTING EPOCH {}/{}...".format(epoch + 1, epochs))
 
@@ -192,7 +209,7 @@ def train_model(train_file, model_file):
                 max_prob, predicted_index = torch.max(tag_scores[i], 0)
                 if predicted_index.item() == tag_indices[i].item():
                     num_correct += 1
-            print("Epoch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, loss.data[0], num_correct / tag_indices.shape[0]))
+            print("Epoch {}/{}: Loss {:.3f} | Accuracy {:.3f}".format(epoch + 1, epochs, loss.data.item(), num_correct / tag_indices.shape[0]))
 
      
     print('Finished...')

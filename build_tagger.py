@@ -23,7 +23,7 @@ if use_gpu:
     print("Running train with GPU...")
     device = torch.device("cuda:0")
 epochs = 1
-batch_size = 256
+batch_size = 512
 debug = True
 
 # Constants
@@ -252,7 +252,7 @@ def train_model(train_file, model_file):
 
     # Train model
     for epoch in range(epochs):
-        if debug: print("STARTING EPOCH {}/{}...".format(epoch + 1, epochs))
+        if debug: print("Starting epoch {}/{}...".format(epoch + 1, epochs))
 
         # Shuffle dataset and split into batches
         preprocessed_data = list(batch_data(data, batch_size))
@@ -271,15 +271,14 @@ def train_model(train_file, model_file):
             tag_scores_batch, max_sentence_length = model(char_indices_batch, word_indices_batch)
 
             # Pad output to max sentence length and collapse output from different batches
-            target = []
-            output = []
             for idx, tag_indices in enumerate(tag_indices_batch):
-                target.extend(tag_indices)
                 for i in range(len(tag_indices), max_sentence_length):
-                    target.append(PAD_TARGET_INDEX)
-                output.extend(tag_scores_batch[idx])
-            target = torch.tensor(target, dtype=torch.long).to(device)
-            output = torch.stack(output).to(device)
+                    tag_indices.append(PAD_TARGET_INDEX)
+                tag_indices_batch[idx] = torch.tensor(tag_indices, dtype=torch.long).to(device)
+            tag_indices_batch = torch.stack(tag_indices_batch).to(device)
+            target = tag_indices_batch.view(1, -1)
+            target = torch.squeeze(target).to(device)
+            output = tag_scores_batch.view(-1, tag_scores_batch.size()[-1])
 
             # Backward pass
             loss = loss_function(output, target)

@@ -23,10 +23,12 @@ if use_gpu:
     print("Running train with GPU...")
     device = torch.device("cuda:0")
 epochs = 1
-batch_size = 512
+batch_size = 64
 debug = True
 
 # Constants
+UNK_KEY = '<UNK>'
+UNKNOWN_INPUT_INDEX = 0
 PAD_TARGET_INDEX = -1
 
 class POSTagger(nn.Module):
@@ -155,9 +157,9 @@ def preprocess(lines):
             preprocessed_sent_tokens.append(tokens[0])                      # TODO: currently, given word1/word2/tag, ignore word2
         preprocessed_data.append((preprocessed_sent_tokens, sent_tags))     # Add to preprocessed sentences
             
-    return build_dictionary(set(char_set)), build_dictionary(set(word_set)), build_dictionary(set(tag_set)), preprocessed_data
+    return build_dictionary(set(char_set), add_unknown=True), build_dictionary(set(word_set), add_unknown=True), build_dictionary(set(tag_set), include_reverse=True), preprocessed_data
     
-def build_dictionary(item_set):
+def build_dictionary(item_set, add_unknown=False, include_reverse=False):
     '''
     Given a set of items, return a dictionary of the form
     {
@@ -167,8 +169,12 @@ def build_dictionary(item_set):
     where each index is unique and in increasing order.
     '''
     result = {}
+    result_reversed = {}
+    if add_unknown: result[UNK_KEY] = len(result)
     for item in item_set:
         result[item] = len(result)
+        if include_reverse: result_reversed[len(result_reversed)] = item
+    if include_reverse: return result, result_reversed
     return result
 
 def read_input(fname):
@@ -241,7 +247,7 @@ def train_model(train_file, model_file):
 
     # Prepare dataset
     lines = read_input(train_file)                 
-    char_dict, word_dict, tag_dict, data = preprocess(lines)
+    char_dict, word_dict, (tag_dict, tag_dict_reversed), data = preprocess(lines)
 
     # Prepare model
     model = POSTagger(char_dict, word_dict, tag_dict)
@@ -301,6 +307,7 @@ def train_model(train_file, model_file):
                 print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
 
     # Save model
+    model.tag_dict_reversed = tag_dict_reversed
     save_model(model_file, model)
 
     end = datetime.now()

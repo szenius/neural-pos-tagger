@@ -11,6 +11,19 @@ import torch.nn.functional as F
 import pickle as pk
 from datetime import datetime
 
+torch.manual_seed(1)
+
+# Parameters
+use_gpu = torch.cuda.is_available()
+device = torch.device("cpu")
+if use_gpu:
+    print("Running train with GPU...")
+    device = torch.device("cuda:0")
+batch_size = 1
+
+# Constants
+UNK_KEY = '<UNK>'
+PAD_TARGET_INDEX = -1
 
 class POSTagger(nn.Module):
     '''
@@ -109,15 +122,121 @@ def load_model(model_file):
     '''
     Loads model from model_file
     '''
-    model = torch.load(model_file)
+    model = torch.load(model_file, map_location=device)
     return model
+
+def preprocess(lines):
+    '''
+    Preprocess each sentence into list of tokens
+    Return list of preprocessed sentences
+    '''
+    preprocessed_data = []
+    for sentence in lines:
+        preprocessed_data.append(sentence.split(" "))
+    return preprocessed_data
+
+def read_input(fname):
+    '''
+    Read file into list of lines
+    '''
+    with open(fname) as f:
+        lines = f.readlines()
+    return [x.strip() for x in lines]   
+
+def batch_data(data, batch_size):
+    '''
+    Split dataset into batches
+    '''
+    for i in range(0, len(data), batch_size):
+        yield data[i:i+batch_size]
+
+def get_word_char_indices(sentence, char_dict, word_dict):
+    '''
+    Given a sentence, the character and word dictionaries, generate the sequences of 
+    word indices and character indices for this particular sentence.
+    Also return max_char_length, which is the length of the longest word.
+    '''
+    word_indices = []
+    char_indices = []
+    for token in sentence:
+        if '/' in token: token = token.split('/')[0]        # TODO: Given word1/word2/tag, only add word1 indices
+
+        # Read word index from dictionary
+        if token in word_dict:
+            word_indices.append(word_dict[token])
+        else: word_indices.append(word_dict[UNK_KEY])
+
+        # Read character indices from dictionary
+        char_indices_for_word = []
+        for c in list(token):
+            if c in char_dict:
+                char_indices_for_word.append(char_dict[c])
+            else: char_indices_for_word.append(char_dict[UNK_KEY])
+        char_indices.append(char_indices_for_word)
+
+    return char_indices, word_indices
+
+def sentences_to_indices(sentences, char_dict, word_dict):
+    '''
+    Expects sentences to be a list of list of tokens.
+    Converts sentences to character indices and word indices respectively.
+    '''
+    char_indices_list = []
+    word_indices_list = []
+    for sentence in sentences:
+        char_indices, word_indices = get_word_char_indices(sentence, char_dict, word_dict)
+        char_indices_list.append(char_indices)
+        word_indices_list.append(word_indices)
+    return char_indices_list, word_indices_list
+
+def add_tags_to_sentence(tokens, predicted_tags):
+    '''
+    Given a list of tokens (belonging to a sentence) and the predicted tags per token, collapse them into
+    a single String in POS tagged sentence format and return
+    '''
+    for i in range(len(tokens)):
+        tokens[i] = '/'.join([tokens[i], predicted_tags[i]])
+    return ' '.join(tokens)
+
+def save_answer(out_file, output):
+    '''
+    Expects output to be list of Strings. Writes output to out_file.
+    '''
+    with open(out_file, 'w') as f:
+        for item in output:
+            f.write("%s\n" % item)
 
 def tag_sentence(test_file, model_file, out_file):
     start = datetime.now()
 
-    # Load model and dictionaries
+    # Load model
     model = load_model(model_file)
-    print(model.char_dict)
+    model.lstm_hidden_embeddings = model.init_hidden_embeddings(batch_size)
+    model.lstm.flatten_parameters()
+
+    # Load dictionaries
+    char_dict = model.char_dict
+    word_dict = model.word_dict
+    tag_dict_reversed = model.tag_dict_reversed
+
+    # Load test dataset
+    lines = read_input(test_file)
+    sentences_as_tokens_lists = preprocess(lines)
+    char_indices, word_indices = sentences_to_indices(sentences_as_tokens_lists, char_dict, word_dict)
+
+    # Run test dataset through model
+    output = []
+    for i in range(len(char_indices)):
+        out_probs, max_sentence_length = model([char_indices[i]], [word_indices[i]])
+        out_probs = torch.squeeze(out_probs).to(device)
+        predicted_tags = []
+        for pset in out_probs:
+            max_prob, predicted_index = torch.max(pset, 0)
+            predicted_tags.append(tag_dict_reversed[predicted_index.item()])
+        output.append(add_tags_to_sentence(sentences_as_tokens_lists[i], predicted_tags))
+    
+    # Save answer
+    save_answer(out_file, output)
 
     end = datetime.now()
     print('Finished... Took {}'.format(end - start))

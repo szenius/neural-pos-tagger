@@ -1,3 +1,4 @@
 sents.*
 .vscode/*
 *cache*
+model-file

@@ -9,11 +9,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.autograd import Variable
-from torch.nn.utils.rnn import pad_packed_sequence
 
 import numpy as np
 from random import shuffle
+import pickle as pk
 
 torch.manual_seed(1)
 
@@ -23,15 +22,25 @@ device = torch.device("cpu")
 if use_gpu:
     print("Running train with GPU...")
     device = torch.device("cuda:0")
-epochs = 10
-batch_size = 128
+epochs = 1
+batch_size = 256
+debug = True
 
 # Constants
 PAD_TARGET_INDEX = -1
 
 class POSTagger(nn.Module):
-    def __init__(self, charset_size, vocab_size, tagset_size):
+    '''
+    POS Tagger using CNN and LSTM.
+    '''
+
+    def __init__(self, char_dict, word_dict, tag_dict):
         super(POSTagger, self).__init__()
+
+        # Save dictionaries
+        self.char_dict = char_dict
+        self.word_dict = word_dict
+        self.tag_dict = tag_dict
 
         # Hyperparameters
         self.char_embedding_dim = 10
@@ -45,14 +54,14 @@ class POSTagger(nn.Module):
         self.dropout = 0.5
 
         # Embeddings
-        self.char_embeddings = nn.Embedding(charset_size, self.char_embedding_dim).to(device)
-        self.word_embeddings = nn.Embedding(vocab_size, self.word_embedding_dim).to(device)
+        self.char_embeddings = nn.Embedding(len(self.char_dict), self.char_embedding_dim).to(device)
+        self.word_embeddings = nn.Embedding(len(self.word_dict), self.word_embedding_dim).to(device)
         self.lstm_hidden_embeddings = self.init_hidden_embeddings(batch_size)
 
         # Layers
         self.conv = nn.Conv1d(self.char_embedding_dim, self.conv_filters, self.conv_kernel, bias=True, padding=(self.conv_kernel // 2)).to(device)
         self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout, num_layers=self.lstm_num_layers).to(device)
-        self.dense = nn.Linear(self.lstm_hidden_dim, tagset_size).to(device)
+        self.dense = nn.Linear(self.lstm_hidden_dim, len(self.tag_dict)).to(device)
     
     def init_hidden_embeddings(self, batch_size):
         return (torch.zeros(self.lstm_num_layers, batch_size, self.lstm_hidden_dim).to(device),
@@ -60,8 +69,19 @@ class POSTagger(nn.Module):
     
     def forward(self, char_indices_batch, word_indices_batch):
         '''
-        Input sentence should be a list of tokens.
-        Runs Character level CNN + Word level bi-directional LSTM.
+        Input expects a batch of sentences, represented character indices and word indices.
+            char_indices_batch: (batch_size, num_words_in_sentence, num_characters_in_word)
+            word_indices_batch: (batch_size, num_words_in_sentence)
+        
+        Runs 
+            Embedding through the character indices to generate character embeddings
+            CNN over character embeddings grouped as words to generate character level word embeddings
+            Embedding through the word indices to generate word level word embeddings
+            Concatenates char and word level word embeddings as final word embeddings
+            Pad each sentence to max sentence length in batch
+            Bi-directional LSTM over word embeddings to generate a probability set for the POS tag set
+
+        Returns tag_scores (batch_size, num_words, tagset_probabilities) and the maximum sentence length for this batch
         '''
         ############ Character-level CNN ############
         batch_sentence_embedding = []
@@ -86,6 +106,8 @@ class POSTagger(nn.Module):
             # Update max sentence length, add sentence embedding to batch list
             max_sentence_length = max(max_sentence_length, len(sentence_embedding))
             batch_sentence_embedding.append(sentence_embedding)
+
+        ############ Word-level LSTM ############
         # Pad each sentence to max length
         empty_word_embedding = [PAD_TARGET_INDEX for i in range(self.conv_filters + self.word_embedding_dim)]
         for sent_index, sentence in enumerate(batch_sentence_embedding):
@@ -93,13 +115,12 @@ class POSTagger(nn.Module):
                 sentence.append(torch.tensor(empty_word_embedding.copy(), dtype=torch.float).to(device))
             batch_sentence_embedding[sent_index] = torch.stack(sentence).to(device)
         batch_sentence_embedding = torch.stack(batch_sentence_embedding).to(device)
-
-        ############ Word-level LSTM ############
+        # Run batch through LSTM
         lstm_out, self.lstm_hidden_embeddings = self.lstm(batch_sentence_embedding.view(batch_sentence_embedding.size()[1], len(char_indices_batch), -1), self.lstm_hidden_embeddings)
         tag_space = self.dense(lstm_out.view(len(char_indices_batch), lstm_out.size()[0], -1))
         tag_scores = F.log_softmax(tag_space, dim=2).to(device)
         return tag_space, max_sentence_length
-        
+
 
 def preprocess(lines):
     '''
@@ -185,10 +206,14 @@ def batch_data(data, batch_size):
     '''
     Split dataset into batches
     '''
+    shuffle(data)
     for i in range(0, len(data), batch_size):
         yield data[i:i+batch_size]
 
 def get_indices_for_batch(batch, char_dict, word_dict, tag_dict):
+    '''
+    For each batch of sentences, get the list of char indices, word indices and tag indices
+    '''
     char_indices_batch = []
     word_indices_batch = []
     tag_indices_batch = []
@@ -202,16 +227,24 @@ def get_indices_for_batch(batch, char_dict, word_dict, tag_dict):
         tag_indices_batch.append(tag_indices)
     return char_indices_batch, word_indices_batch, tag_indices_batch
 
+def save_model(model_file, model):
+    '''
+    Save model into model_file 
+    '''
+    torch.save(model, model_file)
+
 def train_model(train_file, model_file):
+    '''
+    This is the main training method. Here we prepare the dataset, model, run the training, then save the model.
+    '''
     start = datetime.now()
 
     # Prepare dataset
     lines = read_input(train_file)                 
-    char_dict, word_dict, tag_dict, preprocessed_data = preprocess(lines)
-    preprocessed_data = list(batch_data(preprocessed_data, batch_size))
+    char_dict, word_dict, tag_dict, data = preprocess(lines)
 
     # Prepare model
-    model = POSTagger(len(char_dict), len(word_dict), len(tag_dict))
+    model = POSTagger(char_dict, word_dict, tag_dict)
     if use_gpu:
         model = model.cuda()
     loss_function = nn.CrossEntropyLoss(ignore_index=-1).to(device)                               # TODO: Can try setting weight?
@@ -219,10 +252,13 @@ def train_model(train_file, model_file):
 
     # Train model
     for epoch in range(epochs):
-        print("STARTING EPOCH {}/{}...".format(epoch + 1, epochs))
-        shuffle(preprocessed_data)
+        if debug: print("STARTING EPOCH {}/{}...".format(epoch + 1, epochs))
+
+        # Shuffle dataset and split into batches
+        preprocessed_data = list(batch_data(data, batch_size))
+
         for batch_index, batch in enumerate(preprocessed_data):
-            start_batch = datetime.now()
+            if debug: start_batch = datetime.now()
 
             # Clear gradients and hidden layer
             model.zero_grad()
@@ -250,19 +286,23 @@ def train_model(train_file, model_file):
             loss.backward()
             optimizer.step()
 
-            end_batch = datetime.now()
+            if debug: 
+                end_batch = datetime.now()
 
-            # Print loss and accuracy
-            num_correct = 0
-            num_predictions = 0
-            for i in range(output.size()[0]):
-                if target[i].item() == PAD_TARGET_INDEX:
-                    continue
-                max_prob, predicted_index = torch.max(output[i], 0)
-                num_predictions += 1
-                if predicted_index.item() == target[i].item():
-                    num_correct += 1
-            print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
+                # Print loss and accuracy
+                num_correct = 0
+                num_predictions = 0
+                for i in range(output.size()[0]):
+                    if target[i].item() == PAD_TARGET_INDEX:
+                        continue
+                    max_prob, predicted_index = torch.max(output[i], 0)
+                    num_predictions += 1
+                    if predicted_index.item() == target[i].item():
+                        num_correct += 1
+                print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
+
+    # Save model
+    save_model(model_file, model)
 
     end = datetime.now()
     print('Finished... Took {}'.format(end - start))

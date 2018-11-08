@@ -23,9 +23,9 @@ device = torch.device("cpu")
 if use_gpu:
     print("Running train with GPU...")
     device = torch.device("cuda:0")
-epochs = 1
-batch_size = 64
-debug = True
+epochs = 5
+batch_size = 16
+debug = False
 
 # Constants
 UNK_KEY = '<UNK>'
@@ -47,12 +47,10 @@ class POSTagger(nn.Module):
 
         # Hyperparameters
         self.char_embedding_dim = 10
-        self.word_embedding_dim = 250
-        self.conv_in_channels = 1
+        self.word_embedding_dim = 200
         self.conv_filters = 32
-        self.conv_kernel = 3
-        self.maxpool_kernel = 1
-        self.lstm_hidden_dim = 250
+        self.conv_kernel = 5
+        self.lstm_hidden_dim = self.word_embedding_dim
         self.lstm_num_layers = 2
         self.dropout = 0.5
 
@@ -63,7 +61,7 @@ class POSTagger(nn.Module):
 
         # Layers
         self.conv = nn.Conv1d(self.char_embedding_dim, self.conv_filters, self.conv_kernel, bias=True, padding=(self.conv_kernel // 2)).to(device)
-        self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout, num_layers=self.lstm_num_layers).to(device)
+        self.lstm = nn.LSTM(self.word_embedding_dim + self.conv_filters, self.lstm_hidden_dim, dropout=self.dropout, num_layers=self.lstm_num_layers, batch_first=True).to(device)
         self.dense = nn.Linear(self.lstm_hidden_dim, len(self.tag_dict)).to(device)
     
     def init_hidden_embeddings(self, batch_size):
@@ -97,11 +95,11 @@ class POSTagger(nn.Module):
         word_embedding_word_level = word_indices_batch.view(-1)
         word_embedding_word_level = self.word_embeddings(word_embedding_word_level)
         # Concatenate Character-level and Word-level Embeddings
-        batch_sentence_embedding = torch.cat((word_embedding_word_level, word_embedding_char_level), dim=1)
+        batch_sentence_embedding = torch.cat((word_embedding_word_level, word_embedding_char_level), dim=1).to(device)
         batch_sentence_embedding = batch_sentence_embedding.view(char_indices_batch.shape[0], -1, batch_sentence_embedding.shape[-1])
         # Run Embeddings through LSTM
-        lstm_out, self.lstm_hidden_embeddings = self.lstm(batch_sentence_embedding.view(batch_sentence_embedding.size()[1], len(char_indices_batch), -1), self.lstm_hidden_embeddings)
-        tag_space = self.dense(lstm_out.view(len(char_indices_batch), lstm_out.size()[0], -1))
+        lstm_out, self.lstm_hidden_embeddings = self.lstm(batch_sentence_embedding, self.lstm_hidden_embeddings)
+        tag_space = self.dense(lstm_out)
         tag_scores = F.log_softmax(tag_space, dim=2).to(device)
         return tag_space
 
@@ -163,10 +161,7 @@ def preprocess(lines):
             preprocessed_sent_tokens.append(tokens[0])                      # TODO: currently, given word1/word2/tag, ignore word2
         preprocessed_data.append((preprocessed_sent_tokens, sent_tags))     # Add to preprocessed sentences
             
-    return build_dictionary(set(char_set), add_unknown=True, add_pad=True),\
-    build_dictionary(set(word_set), add_unknown=True, add_pad=True),\
-    build_dictionary(set(tag_set), include_reverse=True),\
-    preprocessed_data
+    return build_dictionary(set(char_set), add_unknown=True, add_pad=True), build_dictionary(set(word_set), add_unknown=True, add_pad=True), build_dictionary(set(tag_set), include_reverse=True), preprocessed_data
     
 def build_dictionary(item_set, add_unknown=False, include_reverse=False, add_pad=False):
     '''
@@ -211,15 +206,6 @@ def get_word_char_indices(sentence, char_dict, word_dict):
         char_indices.append(char_indices_for_word)
         max_word_length = max(max_word_length, len(char_indices_for_word))
     return char_indices, word_indices, max_word_length
-
-def get_word_indices(sent_tokens, word_dict):
-    '''
-    Converts words into indices based on the word dictionary. 
-    '''
-    word_indices = []
-    for token in sentence: 
-        word_indices.append(word_dict[token])
-    return word_indices
 
 def get_tag_indices(tags, tag_dict):
     '''
@@ -275,7 +261,6 @@ def pad_indices(char_indices_batch, word_indices_batch, tag_indices_batch, char_
         char_indices_batch[i] = torch.stack(char_indices_batch[i]).to(device)
     return torch.stack(char_indices_batch).to(device), torch.stack(word_indices_batch).to(device), torch.stack(tag_indices_batch).to(device)
 
-
 def save_model(model_file, model):
     '''
     Save model into model_file 
@@ -297,16 +282,14 @@ def train_model(train_file, model_file):
     model = POSTagger(char_dict, word_dict, tag_dict)
     if use_gpu:
         model = model.cuda()
-    loss_function = nn.CrossEntropyLoss(ignore_index=-1).to(device)                               # TODO: Can try setting weight?
+    loss_function = nn.CrossEntropyLoss(ignore_index=PAD_TARGET_INDEX).to(device)                               # TODO: Can try setting weight?
     optimizer = optim.Adam(model.parameters()) 
 
     # Train model
-    dataloader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    dataloader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, num_workers=8)
     for epoch in range(epochs):
-        if debug: print("Starting epoch {}/{}...".format(epoch + 1, epochs))
-
         for batch_index, batch in enumerate(dataloader):
-            if debug: start_batch = datetime.now()
+            start_batch = datetime.now()
 
             # Clear gradients and hidden layer
             model.zero_grad()
@@ -314,8 +297,7 @@ def train_model(train_file, model_file):
 
             # Prepare input to model
             char_indices_batch, word_indices_batch, tag_indices_batch, max_sent_length, max_word_length = batch_to_indices(batch, char_dict, word_dict, tag_dict)
-            char_indices_batch, word_indices_batch, tag_indices_batch = pad_indices(char_indices_batch,\
-            word_indices_batch, tag_indices_batch, char_dict, word_dict, max_sent_length, max_word_length)
+            char_indices_batch, word_indices_batch, tag_indices_batch = pad_indices(char_indices_batch, word_indices_batch, tag_indices_batch, char_dict, word_dict, max_sent_length, max_word_length)
 
             # Forward pass
             tag_scores_batch = model(char_indices_batch, word_indices_batch)
@@ -329,20 +311,22 @@ def train_model(train_file, model_file):
             loss.backward()
             optimizer.step()
 
-            if debug: 
-                end_batch = datetime.now()
-
-                # Print loss and accuracy
-                num_correct = 0
-                num_predictions = 0
-                for i in range(output.size()[0]):
-                    if target[i].item() == PAD_TARGET_INDEX:
-                        continue
-                    max_prob, predicted_index = torch.max(output[i], 0)
-                    num_predictions += 1
-                    if predicted_index.item() == target[i].item():
-                        num_correct += 1
-                print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, math.ceil(len(data)/batch_size), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
+            # if debug or batch_index + 1 == math.ceil(len(data)/batch_size): 
+            #     # Print loss and accuracy
+            #     num_correct = 0
+            #     num_predictions = 0
+            #     for i in range(output.size()[0]):
+            #         if target[i].item() == PAD_TARGET_INDEX:
+            #             continue
+            #         max_prob, predicted_index = torch.max(output[i], 0)
+            #         num_predictions += 1
+            #         if predicted_index.item() == target[i].item():
+            #             num_correct += 1
+            #     end_batch = datetime.now()
+            #     print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, math.ceil(len(data)/batch_size), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
+            # else:
+                # end_batch = datetime.now()
+                # print("Epoch {}/{} ||| Batch {}/{} ||| Loss {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, math.ceil(len(data)/batch_size), loss.data.item(), end_batch - start_batch))
 
     # Save model
     model.tag_dict_reversed = tag_dict_reversed

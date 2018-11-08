@@ -17,7 +17,7 @@ torch.manual_seed(1)
 use_gpu = torch.cuda.is_available()
 device = torch.device("cpu")
 if use_gpu:
-    print("Running train with GPU...")
+    print("Running test with GPU...")
     device = torch.device("cuda:0")
 batch_size = 1
 

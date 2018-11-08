@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 
 import numpy as np
 from random import shuffle
@@ -28,7 +29,7 @@ debug = True
 
 # Constants
 UNK_KEY = '<UNK>'
-UNKNOWN_INPUT_INDEX = 0
+PAD_KEY = '<PAD>'
 PAD_TARGET_INDEX = -1
 
 class POSTagger(nn.Module):
@@ -85,45 +86,50 @@ class POSTagger(nn.Module):
 
         Returns tag_scores (batch_size, num_words, tagset_probabilities) and the maximum sentence length for this batch
         '''
-        ############ Character-level CNN ############
-        batch_sentence_embedding = []
-        max_sentence_length = 0
-        for sent_index, sentence in enumerate(char_indices_batch):
-            sentence_embedding = []
-            for word_index, word in enumerate(sentence):
-                # Generate character embeddings using Embedding layer
-                word_embedding_char_level = torch.tensor(word, dtype=torch.long).to(device)
-                word_embedding_char_level = self.char_embeddings(word_embedding_char_level)
-                # Run through CNN to get word embedding
-                word_embedding_char_level = word_embedding_char_level.permute(1, 0)
-                word_embedding_char_level = torch.stack([word_embedding_char_level]).to(device)
-                word_embedding_char_level = self.conv(word_embedding_char_level)
-                word_embedding_char_level = torch.max(word_embedding_char_level, 2)[0][0]
-                # Get word embedding from tokens
-                word_embedding_word_level = torch.tensor(word_indices_batch[sent_index][word_index], dtype=torch.long).to(device)
-                word_embedding_word_level = self.word_embeddings(word_embedding_word_level)
-                # Concat word embeddings and add to sentence embedding list
-                word_embedding = torch.cat((word_embedding_char_level, word_embedding_word_level), 0).to(device)
-                sentence_embedding.append(word_embedding)
-            # Update max sentence length, add sentence embedding to batch list
-            max_sentence_length = max(max_sentence_length, len(sentence_embedding))
-            batch_sentence_embedding.append(sentence_embedding)
-
-        ############ Word-level LSTM ############
-        # Pad each sentence to max length
-        empty_word_embedding = [PAD_TARGET_INDEX for i in range(self.conv_filters + self.word_embedding_dim)]
-        for sent_index, sentence in enumerate(batch_sentence_embedding):
-            for i in range(len(sentence), max_sentence_length):
-                sentence.append(torch.tensor(empty_word_embedding.copy(), dtype=torch.float).to(device))
-            batch_sentence_embedding[sent_index] = torch.stack(sentence).to(device)
-        batch_sentence_embedding = torch.stack(batch_sentence_embedding).to(device)
-        # Run batch through LSTM
+        # Character-level Embedding
+        word_embedding_char_level = char_indices_batch.view(-1, char_indices_batch.shape[-1])
+        word_embedding_char_level = self.char_embeddings(word_embedding_char_level)
+        # Run embeddings through CNN
+        word_embedding_char_level = word_embedding_char_level.view(word_embedding_char_level.shape[0], -1, word_embedding_char_level.shape[1])
+        word_embedding_char_level = self.conv(word_embedding_char_level)
+        word_embedding_char_level = torch.max(word_embedding_char_level, 2)[0]
+        # Word-level Embedding
+        word_embedding_word_level = word_indices_batch.view(-1)
+        word_embedding_word_level = self.word_embeddings(word_embedding_word_level)
+        # Concatenate Character-level and Word-level Embeddings
+        batch_sentence_embedding = torch.cat((word_embedding_word_level, word_embedding_char_level), dim=1)
+        batch_sentence_embedding = batch_sentence_embedding.view(char_indices_batch.shape[0], -1, batch_sentence_embedding.shape[-1])
+        # Run Embeddings through LSTM
         lstm_out, self.lstm_hidden_embeddings = self.lstm(batch_sentence_embedding.view(batch_sentence_embedding.size()[1], len(char_indices_batch), -1), self.lstm_hidden_embeddings)
         tag_space = self.dense(lstm_out.view(len(char_indices_batch), lstm_out.size()[0], -1))
         tag_scores = F.log_softmax(tag_space, dim=2).to(device)
-        return tag_space, max_sentence_length
+        return tag_space
 
 
+class TextDataset(Dataset):
+    def __init__(self, char_dict, word_dict, tag_dict, sentence_tags):
+        '''
+        Args:
+            train_file: the input file with POS tagged sentences.
+        '''
+        self.char_dict = char_dict
+        self.word_dict = word_dict
+        self.tag_dict = tag_dict
+        self.sentence_tags = sentence_tags
+        
+    def __len__(self):
+        return len(self.sentence_tags)
+
+    def __getitem__(self, idx):
+        '''
+        Args:
+            idx: corresponds to which line in the data we want to retrieve
+        Returns the sentence text, tags 
+        '''
+        sentence, tags = self.sentence_tags[idx]
+        return ' '.join(sentence), ' '.join(tags)
+
+    
 def preprocess(lines):
     '''
     Read list of sentences, extract characters, words and POS tags, and build a dictionary each for
@@ -157,9 +163,12 @@ def preprocess(lines):
             preprocessed_sent_tokens.append(tokens[0])                      # TODO: currently, given word1/word2/tag, ignore word2
         preprocessed_data.append((preprocessed_sent_tokens, sent_tags))     # Add to preprocessed sentences
             
-    return build_dictionary(set(char_set), add_unknown=True), build_dictionary(set(word_set), add_unknown=True), build_dictionary(set(tag_set), include_reverse=True), preprocessed_data
+    return build_dictionary(set(char_set), add_unknown=True, add_pad=True),\
+    build_dictionary(set(word_set), add_unknown=True, add_pad=True),\
+    build_dictionary(set(tag_set), include_reverse=True),\
+    preprocessed_data
     
-def build_dictionary(item_set, add_unknown=False, include_reverse=False):
+def build_dictionary(item_set, add_unknown=False, include_reverse=False, add_pad=False):
     '''
     Given a set of items, return a dictionary of the form
     {
@@ -170,10 +179,11 @@ def build_dictionary(item_set, add_unknown=False, include_reverse=False):
     '''
     result = {}
     result_reversed = {}
-    if add_unknown: result[UNK_KEY] = len(result)
+    if add_pad: result[PAD_KEY] = len(result)
     for item in item_set:
         result[item] = len(result)
         if include_reverse: result_reversed[len(result_reversed)] = item
+    if add_unknown: result[UNK_KEY] = len(result)
     if include_reverse: return result, result_reversed
     return result
 
@@ -189,17 +199,27 @@ def get_word_char_indices(sentence, char_dict, word_dict):
     '''
     Given a sentence, the character and word dictionaries, generate the sequences of 
     word indices and character indices for this particular sentence.
-    Also return max_char_length, which is the length of the longest word.
     '''
     word_indices = []
     char_indices = []
+    max_word_length = 0
     for token in sentence:
         word_indices.append(word_dict[token])
         char_indices_for_word = []
         for c in list(token):
             char_indices_for_word.append(char_dict[c])
         char_indices.append(char_indices_for_word)
-    return char_indices, word_indices
+        max_word_length = max(max_word_length, len(char_indices_for_word))
+    return char_indices, word_indices, max_word_length
+
+def get_word_indices(sent_tokens, word_dict):
+    '''
+    Converts words into indices based on the word dictionary. 
+    '''
+    word_indices = []
+    for token in sentence: 
+        word_indices.append(word_dict[token])
+    return word_indices
 
 def get_tag_indices(tags, tag_dict):
     '''
@@ -208,30 +228,53 @@ def get_tag_indices(tags, tag_dict):
     tag_indices = [tag_dict[tag] for tag in tags]
     return tag_indices
 
-def batch_data(data, batch_size):
-    '''
-    Split dataset into batches
-    '''
-    shuffle(data)
-    for i in range(0, len(data), batch_size):
-        yield data[i:i+batch_size]
-
-def get_indices_for_batch(batch, char_dict, word_dict, tag_dict):
+def batch_to_indices(batch, char_dict, word_dict, tag_dict):
     '''
     For each batch of sentences, get the list of char indices, word indices and tag indices
     '''
     char_indices_batch = []
     word_indices_batch = []
     tag_indices_batch = []
-    for sentence, tags in batch:
+    max_sent_length = 0
+    max_word_length = 0
+    sentences_batch, tags_batch = batch
+    for i in range(len(sentences_batch)):
+        # Split each data row into list of tokens and tags
+        sentence = sentences_batch[i].split(" ")
+        tags = tags_batch[i].split(" ")
         # Get indices from dictionaries
-        char_indices, word_indices = get_word_char_indices(sentence, char_dict, word_dict)
+        char_indices, word_indices, curr_max_word_length = get_word_char_indices(sentence, char_dict, word_dict)
         tag_indices = get_tag_indices(tags, tag_dict)
         # Append indices to batch indices list
         char_indices_batch.append(char_indices)
         word_indices_batch.append(word_indices)
         tag_indices_batch.append(tag_indices)
-    return char_indices_batch, word_indices_batch, tag_indices_batch
+        # Update max lengths
+        max_sent_length = max(max_sent_length, len(word_indices))
+        max_word_length = max(max_word_length, curr_max_word_length)
+    return char_indices_batch, word_indices_batch, tag_indices_batch, max_sent_length, max_word_length
+
+def pad_indices(char_indices_batch, word_indices_batch, tag_indices_batch, char_dict, word_dict, max_sent_length, max_word_length):
+    ''' 
+    Pad each sentence to same sentence length and each word to same word length
+    '''
+    # Pad sentences to max sentence length
+    for i in range(len(word_indices_batch)):
+        for j in range(len(word_indices_batch[i]), max_sent_length):
+            word_indices_batch[i].append(word_dict[PAD_KEY])
+            tag_indices_batch[i].append(PAD_TARGET_INDEX)
+            char_indices_batch[i].append([char_dict[PAD_KEY]])
+        word_indices_batch[i] = torch.tensor(word_indices_batch[i], dtype=torch.long).to(device)
+        tag_indices_batch[i] = torch.tensor(tag_indices_batch[i], dtype=torch.long).to(device)
+    # Pad words to max word length
+    for i in range(len(char_indices_batch)):
+        for j in range(len(char_indices_batch[i])):
+            for l in range(len(char_indices_batch[i][j]), max_word_length):
+                char_indices_batch[i][j].append(char_dict[PAD_KEY])
+            char_indices_batch[i][j] = torch.tensor(char_indices_batch[i][j], dtype=torch.long).to(device)
+        char_indices_batch[i] = torch.stack(char_indices_batch[i]).to(device)
+    return torch.stack(char_indices_batch).to(device), torch.stack(word_indices_batch).to(device), torch.stack(tag_indices_batch).to(device)
+
 
 def save_model(model_file, model):
     '''
@@ -248,6 +291,7 @@ def train_model(train_file, model_file):
     # Prepare dataset
     lines = read_input(train_file)                 
     char_dict, word_dict, (tag_dict, tag_dict_reversed), data = preprocess(lines)
+    dataset = TextDataset(char_dict, word_dict, tag_dict, data)
 
     # Prepare model
     model = POSTagger(char_dict, word_dict, tag_dict)
@@ -257,33 +301,27 @@ def train_model(train_file, model_file):
     optimizer = optim.Adam(model.parameters()) 
 
     # Train model
+    dataloader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     for epoch in range(epochs):
         if debug: print("Starting epoch {}/{}...".format(epoch + 1, epochs))
 
-        # Shuffle dataset and split into batches
-        preprocessed_data = list(batch_data(data, batch_size))
-
-        for batch_index, batch in enumerate(preprocessed_data):
+        for batch_index, batch in enumerate(dataloader):
             if debug: start_batch = datetime.now()
 
             # Clear gradients and hidden layer
             model.zero_grad()
-            model.lstm_hidden_embeddings = model.init_hidden_embeddings(len(batch))
+            model.lstm_hidden_embeddings = model.init_hidden_embeddings(len(batch[0]))
 
             # Prepare input to model
-            char_indices_batch, word_indices_batch, tag_indices_batch = get_indices_for_batch(batch, char_dict, word_dict, tag_dict)
+            char_indices_batch, word_indices_batch, tag_indices_batch, max_sent_length, max_word_length = batch_to_indices(batch, char_dict, word_dict, tag_dict)
+            char_indices_batch, word_indices_batch, tag_indices_batch = pad_indices(char_indices_batch,\
+            word_indices_batch, tag_indices_batch, char_dict, word_dict, max_sent_length, max_word_length)
 
             # Forward pass
-            tag_scores_batch, max_sentence_length = model(char_indices_batch, word_indices_batch)
+            tag_scores_batch = model(char_indices_batch, word_indices_batch)
 
-            # Pad output to max sentence length and collapse output from different batches
-            for idx, tag_indices in enumerate(tag_indices_batch):
-                for i in range(len(tag_indices), max_sentence_length):
-                    tag_indices.append(PAD_TARGET_INDEX)
-                tag_indices_batch[idx] = torch.tensor(tag_indices, dtype=torch.long).to(device)
-            tag_indices_batch = torch.stack(tag_indices_batch).to(device)
-            target = tag_indices_batch.view(1, -1)
-            target = torch.squeeze(target).to(device)
+            # Prepare output
+            target = tag_indices_batch.view(-1).to(device)
             output = tag_scores_batch.view(-1, tag_scores_batch.size()[-1])
 
             # Backward pass
@@ -304,7 +342,7 @@ def train_model(train_file, model_file):
                     num_predictions += 1
                     if predicted_index.item() == target[i].item():
                         num_correct += 1
-                print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, len(preprocessed_data), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
+                print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, math.ceil(len(data)/batch_size), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
 
     # Save model
     model.tag_dict_reversed = tag_dict_reversed

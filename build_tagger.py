@@ -49,7 +49,7 @@ class POSTagger(nn.Module):
         self.char_embedding_dim = 10
         self.word_embedding_dim = 200
         self.conv_filters = 32
-        self.conv_kernel = 5
+        self.conv_kernel = 2
         self.lstm_hidden_dim = self.word_embedding_dim
         self.lstm_num_layers = 2
         self.dropout = 0.5
@@ -325,8 +325,8 @@ def train_model(train_file, model_file):
             #     end_batch = datetime.now()
             #     print("Epoch {}/{} | Batch {}/{} ||| Loss {:.3f} | Accuracy {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, math.ceil(len(data)/batch_size), loss.data.item(), num_correct / num_predictions, end_batch - start_batch))
             # else:
-                # end_batch = datetime.now()
-                # print("Epoch {}/{} ||| Batch {}/{} ||| Loss {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, math.ceil(len(data)/batch_size), loss.data.item(), end_batch - start_batch))
+            #     end_batch = datetime.now()
+            #     print("Epoch {}/{} ||| Batch {}/{} ||| Loss {:.3f} ||| {}".format(epoch + 1, epochs, batch_index + 1, math.ceil(len(data)/batch_size), loss.data.item(), end_batch - start_batch))
 
     # Save model
     model.tag_dict_reversed = tag_dict_reversed
